@@ -225,7 +225,8 @@ void OrthogonalRenderer::drawTileLayer(QPainter *painter,
 
     QTransform baseTransform = painter->transform();
 
-    for (int y = startY; y < endY; ++y) {
+//    for (int y = startY; y < endY; ++y) {
+    for (int y = endY - 1; y >= startY; --y) {
         for (int x = startX; x < endX; ++x) {
             const Cell &cell = layer->cellAt(x, y);
             if (cell.isEmpty())
