@@ -24,18 +24,25 @@
 
 #include "mapdocument.h"
 #include "mapobject.h"
+#include "mapobjectmodel.h"
 #include "maprenderer.h"
 #include "mapscene.h"
+#include "mapview.h"
 #include "objectgroup.h"
 #include "objectgroupitem.h"
 #include "preferences.h"
 #include "resizemapobject.h"
+#include "tile.h"
+#include "zoomable.h"
 
 #include <QApplication>
 #include <QGraphicsSceneMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QStyleOptionGraphicsItem>
+#include <QVector2D>
+
+#include <cmath>
 
 using namespace Tiled;
 using namespace Tiled::Internal;
@@ -139,31 +146,39 @@ QVariant ResizeHandle::itemChange(GraphicsItemChange change,
 
         if (change == ItemPositionChange) {
             bool snapToGrid = Preferences::instance()->snapToGrid();
-            if (QApplication::keyboardModifiers() & Qt::ControlModifier)
+            bool snapToFineGrid = Preferences::instance()->snapToFineGrid();
+            if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
                 snapToGrid = !snapToGrid;
+                snapToFineGrid = false;
+            }
 
             // Calculate the absolute pixel position
             const QPointF itemPos = mMapObjectItem->pos();
             QPointF pixelPos = value.toPointF() + itemPos;
 
-            // Calculate the new coordinates in tiles
-            QPointF tileCoords = renderer->pixelToTileCoords(pixelPos);
+            // Calculate the new coordinates in pixels
+            QPointF tileCoords = renderer->screenToTileCoords(pixelPos);
             const QPointF objectPos = mMapObjectItem->mapObject()->position();
-            tileCoords -= objectPos;
+            const QPointF objectTilePos = renderer->pixelToTileCoords(objectPos);
+            tileCoords -= objectTilePos;
             tileCoords.setX(qMax(tileCoords.x(), qreal(0)));
             tileCoords.setY(qMax(tileCoords.y(), qreal(0)));
-            if (snapToGrid)
+            if (snapToFineGrid) {
+                int gridFine = Preferences::instance()->gridFine();
+                tileCoords = (tileCoords * gridFine).toPoint();
+                tileCoords /= gridFine;
+            } else if (snapToGrid)
                 tileCoords = tileCoords.toPoint();
-            tileCoords += objectPos;
+            tileCoords += objectTilePos;
 
-            return renderer->tileToPixelCoords(tileCoords) - itemPos;
+            return renderer->tileToScreenCoords(tileCoords) - itemPos;
         }
         else if (change == ItemPositionHasChanged) {
             // Update the size of the map object
             const QPointF newPos = value.toPointF() + mMapObjectItem->pos();
-            QPointF tileCoords = renderer->pixelToTileCoords(newPos);
+            QPointF tileCoords = renderer->screenToPixelCoords(newPos);
             tileCoords -= mMapObjectItem->mapObject()->position();
-            mMapObjectItem->resize(QSizeF(tileCoords.x(), tileCoords.y()));
+            mMapObjectItem->resizeObject(QSizeF(tileCoords.x(), tileCoords.y()));
         }
     }
 
@@ -207,12 +222,17 @@ void MapObjectItem::syncWithMapObject()
     setToolTip(toolTip);
 
     MapRenderer *renderer = mMapDocument->renderer();
-    const QPointF pixelPos = renderer->tileToPixelCoords(mObject->position());
+    const QPointF pixelPos = renderer->pixelToScreenCoords(mObject->position());
     QRectF bounds = renderer->boundingRect(mObject);
+
     bounds.translate(-pixelPos);
 
     setPos(pixelPos);
-    setZValue(pixelPos.y());
+    setRotation(mObject->rotation());
+
+    if (ObjectGroup *objectGroup = mObject->objectGroup())
+        if (objectGroup->drawOrder() == ObjectGroup::TopDownOrder)
+            setZValue(pixelPos.y());
 
     mSyncing = true;
 
@@ -221,7 +241,7 @@ void MapObjectItem::syncWithMapObject()
         prepareGeometryChange();
         mBoundingRect = bounds;
         const QPointF bottomRight = mObject->bounds().bottomRight();
-        const QPointF handlePos = renderer->tileToPixelCoords(bottomRight);
+        const QPointF handlePos = renderer->pixelToScreenCoords(bottomRight);
         mResizeHandle->setPos(handlePos - pixelPos);
     }
 
@@ -237,7 +257,7 @@ void MapObjectItem::setEditable(bool editable)
 
     mIsEditable = editable;
 
-    const bool handlesVisible = mIsEditable && !mObject->tile();
+    const bool handlesVisible = mIsEditable && mObject->cell().isEmpty();
     mResizeHandle->setVisible(handlesVisible && mObject->polygon().isEmpty());
 
     if (mIsEditable)
@@ -262,9 +282,11 @@ QPainterPath MapObjectItem::shape() const
 
 void MapObjectItem::paint(QPainter *painter,
                           const QStyleOptionGraphicsItem *,
-                          QWidget *)
+                          QWidget *widget)
 {
+    qreal scale = static_cast<MapView*>(widget->parent())->zoomable()->scale();
     painter->translate(-pos());
+    mMapDocument->renderer()->setPainterScale(scale);
     mMapDocument->renderer()->drawMapObject(painter, mObject, mColor);
 
     if (mIsEditable) {
@@ -276,6 +298,7 @@ void MapObjectItem::paint(QPainter *painter,
         QLineF bottom(mBoundingRect.bottomLeft(), mBoundingRect.bottomRight());
 
         QPen dashPen(Qt::DashLine);
+        dashPen.setCosmetic(true);
         dashPen.setDashOffset(qMax(qreal(0), x()));
         painter->setPen(dashPen);
         painter->drawLines(QVector<QLineF>() << top << bottom);
@@ -286,26 +309,23 @@ void MapObjectItem::paint(QPainter *painter,
     }
 }
 
-void MapObjectItem::resize(const QSizeF &size)
+void MapObjectItem::resizeObject(const QSizeF &size)
 {
+    // Not using the MapObjectModel because it is also used during object
+    // creation, when the object is not actually part of the map yet.
     mObject->setSize(size);
     syncWithMapObject();
+}
+
+void MapObjectItem::setObjectRotation(qreal angle)
+{
+    mMapDocument->mapObjectModel()->setObjectRotation(mObject, angle);
 }
 
 void MapObjectItem::setPolygon(const QPolygonF &polygon)
 {
     mObject->setPolygon(polygon);
     syncWithMapObject();
-}
-
-MapDocument *MapObjectItem::mapDocument() const
-{
-    return mMapDocument;
-}
-
-QColor MapObjectItem::color() const
-{
-    return mColor;
 }
 
 QColor MapObjectItem::objectColor(const MapObject *object)

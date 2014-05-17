@@ -23,9 +23,8 @@
 
 #include "abstracttool.h"
 #include "maprenderer.h"
-#include "toolmanager.h"
+#include "movabletabwidget.h"
 
-#include <QTabWidget>
 #include <QUndoGroup>
 #include <QFileInfo>
 
@@ -49,7 +48,7 @@ void DocumentManager::deleteInstance()
 
 DocumentManager::DocumentManager(QObject *parent)
     : QObject(parent)
-    , mTabWidget(new QTabWidget)
+    , mTabWidget(new MovableTabWidget)
     , mUndoGroup(new QUndoGroup(this))
     , mSelectedTool(0)
     , mSceneWithTool(0)
@@ -61,11 +60,8 @@ DocumentManager::DocumentManager(QObject *parent)
             SLOT(currentIndexChanged()));
     connect(mTabWidget, SIGNAL(tabCloseRequested(int)),
             SIGNAL(documentCloseRequested(int)));
-
-    ToolManager *toolManager = ToolManager::instance();
-    setSelectedTool(toolManager->selectedTool());
-    connect(toolManager, SIGNAL(selectedToolChanged(AbstractTool*)),
-            SLOT(setSelectedTool(AbstractTool*)));
+    connect(mTabWidget, SIGNAL(tabMoved(int,int)),
+            SLOT(documentTabMoved(int,int)));
 }
 
 DocumentManager::~DocumentManager()
@@ -102,6 +98,15 @@ MapScene *DocumentManager::currentMapScene() const
     return 0;
 }
 
+MapView *DocumentManager::viewForDocument(MapDocument *mapDocument) const
+{
+    const int index = mDocuments.indexOf(mapDocument);
+    if (index == -1)
+        return 0;
+
+    return static_cast<MapView*>(mTabWidget->widget(index));
+}
+
 int DocumentManager::findDocument(const QString &fileName) const
 {
     const QString canonicalFilePath = QFileInfo(fileName).canonicalFilePath();
@@ -120,6 +125,13 @@ int DocumentManager::findDocument(const QString &fileName) const
 void DocumentManager::switchToDocument(int index)
 {
     mTabWidget->setCurrentIndex(index);
+}
+
+void DocumentManager::switchToDocument(MapDocument *mapDocument)
+{
+    const int index = mDocuments.indexOf(mapDocument);
+    if (index != -1)
+        switchToDocument(index);
 }
 
 void DocumentManager::switchToLeftDocument()
@@ -173,8 +185,13 @@ void DocumentManager::closeCurrentDocument()
     if (index == -1)
         return;
 
+    closeDocumentAt(index);
+}
+
+void DocumentManager::closeDocumentAt(int index)
+{
     MapDocument *mapDocument = mDocuments.takeAt(index);
-    MapView *mapView = currentMapView();
+    QWidget *mapView = mTabWidget->widget(index);
 
     mTabWidget->removeTab(index);
     delete mapView;
@@ -218,8 +235,8 @@ void DocumentManager::setSelectedTool(AbstractTool *tool)
     if (mSceneWithTool) {
         mSceneWithTool->disableSelectedTool();
 
-        if (mSelectedTool) {
-            mSceneWithTool->setSelectedTool(mSelectedTool);
+        if (tool) {
+            mSceneWithTool->setSelectedTool(tool);
             mSceneWithTool->enableSelectedTool();
         }
     }
@@ -238,11 +255,16 @@ void DocumentManager::updateDocumentTab()
     mTabWidget->setTabToolTip(index, mapDocument->fileName());
 }
 
-void DocumentManager::centerViewOn(int x, int y)
+void DocumentManager::documentTabMoved(int from, int to)
+{
+    mDocuments.move(from, to);
+}
+
+void DocumentManager::centerViewOn(qreal x, qreal y)
 {
     MapView *view = currentMapView();
     if (!view)
         return;
 
-    view->centerOn(currentDocument()->renderer()->tileToPixelCoords(x, y));
+    view->centerOn(currentDocument()->renderer()->pixelToScreenCoords(x, y));
 }

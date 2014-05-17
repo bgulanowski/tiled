@@ -32,7 +32,7 @@
      <x>0</x>
      <y>0</y>
      <width>553</width>
-     <height>23</height>
+     <height>25</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">
@@ -98,8 +98,12 @@
      <string>&amp;View</string>
     </property>
     <addaction name="actionShowGrid"/>
-    <addaction name="actionSnapToGrid"/>
+    <addaction name="actionShowTileObjectOutlines"/>
+    <addaction name="actionShowTileAnimations"/>
     <addaction name="actionHighlightCurrentLayer"/>
+    <addaction name="separator"/>
+    <addaction name="actionSnapToGrid"/>
+    <addaction name="actionSnapToFineGrid"/>
     <addaction name="separator"/>
     <addaction name="actionZoomIn"/>
     <addaction name="actionZoomOut"/>
@@ -127,6 +131,17 @@
    <addaction name="separator"/>
   </widget>
   <widget class="QStatusBar" name="statusBar"/>
+  <widget class="QToolBar" name="toolsToolBar">
+   <property name="windowTitle">
+    <string>Tools</string>
+   </property>
+   <attribute name="toolBarArea">
+    <enum>TopToolBarArea</enum>
+   </attribute>
+   <attribute name="toolBarBreak">
+    <bool>false</bool>
+   </attribute>
+  </widget>
   <action name="actionOpen">
    <property name="icon">
     <iconset resource="tiled.qrc">
@@ -216,7 +231,7 @@
      <normaloff>:/images/16x16/document-properties.png</normaloff>:/images/16x16/document-properties.png</iconset>
    </property>
    <property name="text">
-    <string>Map &amp;Properties...</string>
+    <string>Map &amp;Properties</string>
    </property>
   </action>
   <action name="actionAutoMap">
@@ -402,6 +417,30 @@
    </property>
    <property name="shortcut">
     <string>H</string>
+   </property>
+  </action>
+  <action name="actionShowTileObjectOutlines">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Tile Object &amp;Outlines</string>
+   </property>
+  </action>
+  <action name="actionSnapToFineGrid">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Snap to &amp;Fine Grid</string>
+   </property>
+  </action>
+  <action name="actionShowTileAnimations">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Tile Animations</string>
    </property>
   </action>
  </widget>

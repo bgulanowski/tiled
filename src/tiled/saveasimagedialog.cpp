@@ -23,6 +23,7 @@
 
 #include "map.h"
 #include "mapdocument.h"
+#include "mapobject.h"
 #include "mapobjectitem.h"
 #include "maprenderer.h"
 #include "imagelayer.h"
@@ -39,6 +40,7 @@
 static const char * const VISIBLE_ONLY_KEY = "SaveAsImage/VisibleLayersOnly";
 static const char * const CURRENT_SCALE_KEY = "SaveAsImage/CurrentScale";
 static const char * const DRAW_GRID_KEY = "SaveAsImage/DrawGrid";
+static const char * const INCLUDE_BACKGROUND_COLOR = "SaveAsImage/IncludeBackgroundColor";
 
 using namespace Tiled;
 using namespace Tiled::Internal;
@@ -87,19 +89,30 @@ SaveAsImageDialog::SaveAsImageDialog(MapDocument *mapDocument,
             s->value(QLatin1String(CURRENT_SCALE_KEY), true).toBool();
     const bool drawTileGrid =
             s->value(QLatin1String(DRAW_GRID_KEY), false).toBool();
+    const bool includeBackgroundColor =
+            s->value(QLatin1String(INCLUDE_BACKGROUND_COLOR), false).toBool();
 
     mUi->visibleLayersOnly->setChecked(visibleLayersOnly);
     mUi->currentZoomLevel->setChecked(useCurrentScale);
     mUi->drawTileGrid->setChecked(drawTileGrid);
+    mUi->includeBackgroundColor->setChecked(includeBackgroundColor);
 
     connect(mUi->browseButton, SIGNAL(clicked()), SLOT(browse()));
     connect(mUi->fileNameEdit, SIGNAL(textChanged(QString)),
             this, SLOT(updateAcceptEnabled()));
+
+    Utils::restoreGeometry(this);
 }
 
 SaveAsImageDialog::~SaveAsImageDialog()
 {
+    Utils::saveGeometry(this);
     delete mUi;
+}
+
+static bool objectLessThan(const MapObject *a, const MapObject *b)
+{
+    return a->y() < b->y();
 }
 
 void SaveAsImageDialog::accept()
@@ -125,15 +138,30 @@ void SaveAsImageDialog::accept()
     const bool visibleLayersOnly = mUi->visibleLayersOnly->isChecked();
     const bool useCurrentScale = mUi->currentZoomLevel->isChecked();
     const bool drawTileGrid = mUi->drawTileGrid->isChecked();
+    const bool includeBackgroundColor = mUi->includeBackgroundColor->isChecked();
 
     MapRenderer *renderer = mMapDocument->renderer();
-    QSize mapSize = renderer->mapSize();
 
+    // Remember the current render flags
+    const Tiled::RenderFlags renderFlags = renderer->flags();
+
+    renderer->setFlag(ShowTileObjectOutlines, false);
+
+    QSize mapSize = renderer->mapSize();
     if (useCurrentScale)
         mapSize *= mCurrentScale;
 
-    QImage image(mapSize, QImage::Format_ARGB32);
-    image.fill(Qt::transparent);
+    QImage image(mapSize, QImage::Format_ARGB32_Premultiplied);
+
+    if (includeBackgroundColor) {
+        if (mMapDocument->map()->backgroundColor().isValid())
+            image.fill(mMapDocument->map()->backgroundColor());
+        else
+            image.fill(Qt::gray);
+    }
+    else
+        image.fill(Qt::transparent);
+
     QPainter painter(&image);
 
     if (useCurrentScale && mCurrentScale != qreal(1)) {
@@ -141,7 +169,9 @@ void SaveAsImageDialog::accept()
                                QPainter::HighQualityAntialiasing);
         painter.setTransform(QTransform::fromScale(mCurrentScale,
                                                    mCurrentScale));
-    }
+        renderer->setPainterScale(mCurrentScale);
+    } else
+        renderer->setPainterScale(1);
 
     foreach (const Layer *layer, mMapDocument->map()->layers()) {
         if (visibleLayersOnly && !layer->isVisible())
@@ -156,9 +186,16 @@ void SaveAsImageDialog::accept()
         if (tileLayer) {
             renderer->drawTileLayer(&painter, tileLayer);
         } else if (objGroup) {
-            foreach (const MapObject *object, objGroup->objects()) {
-                const QColor color = MapObjectItem::objectColor(object);
-                renderer->drawMapObject(&painter, object, color);
+            QList<MapObject*> objects = objGroup->objects();
+
+            if (objGroup->drawOrder() == ObjectGroup::TopDownOrder)
+                qStableSort(objects.begin(), objects.end(), objectLessThan);
+
+            foreach (const MapObject *object, objects) {
+                if (object->isVisible()) {
+                    const QColor color = MapObjectItem::objectColor(object);
+                    renderer->drawMapObject(&painter, object, color);
+                }
             }
         } else if (imageLayer) {
             renderer->drawImageLayer(&painter, imageLayer);
@@ -171,6 +208,9 @@ void SaveAsImageDialog::accept()
                            prefs->gridColor());
     }
 
+    // Restore the previous render flags
+    renderer->setFlags(renderFlags);
+
     image.save(fileName);
     mPath = QFileInfo(fileName).path();
 
@@ -179,6 +219,7 @@ void SaveAsImageDialog::accept()
     s->setValue(QLatin1String(VISIBLE_ONLY_KEY), visibleLayersOnly);
     s->setValue(QLatin1String(CURRENT_SCALE_KEY), useCurrentScale);
     s->setValue(QLatin1String(DRAW_GRID_KEY), drawTileGrid);
+    s->setValue(QLatin1String(INCLUDE_BACKGROUND_COLOR), includeBackgroundColor);
 
     QDialog::accept();
 }

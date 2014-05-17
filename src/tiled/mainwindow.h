@@ -25,6 +25,7 @@
 #define MAINWINDOW_H
 
 #include "mapdocument.h"
+#include "consoledock.h"
 
 #include <QMainWindow>
 #include <QSessionManager>
@@ -46,19 +47,26 @@ class MapReaderInterface;
 
 namespace Internal {
 
-class ClipboardManager;
+class AutomappingManager;
+class BucketFillTool;
+class CommandButton;
 class DocumentManager;
 class LayerDock;
 class MapDocumentActionHandler;
 class MapScene;
-class StampBrush;
-class BucketFillTool;
-class TerrainBrush;
-class TilesetDock;
-class TerrainDock;
+class MapsDock;
 class MapView;
-class CommandButton;
+class MiniMapDock;
 class ObjectsDock;
+class PropertiesDock;
+class QuickStampManager;
+class StampBrush;
+class TerrainBrush;
+class TerrainDock;
+class TileAnimationEditor;
+class TileCollisionEditor;
+class TilesetDock;
+class ToolManager;
 class Zoomable;
 
 /**
@@ -72,7 +80,7 @@ class MainWindow : public QMainWindow
     Q_OBJECT
 
 public:
-    MainWindow(QWidget *parent = 0, Qt::WFlags flags = 0);
+    MainWindow(QWidget *parent = 0, Qt::WindowFlags flags = 0);
     ~MainWindow();
 
     void commitData(QSessionManager &manager);
@@ -129,11 +137,11 @@ public slots:
 
     bool newTileset(const QString &path = QString());
     void newTilesets(const QStringList &paths);
+    void reloadTilesets();
     void addExternalTileset();
     void resizeMap();
     void offsetMap();
     void editMapProperties();
-    void autoMap();
 
     void updateWindowTitle();
     void updateActions();
@@ -142,15 +150,17 @@ public slots:
     void openRecentFile();
     void clearRecentFiles();
 
-    void editLayerProperties();
+    void flipHorizontally() { flip(FlipHorizontally); }
+    void flipVertically() { flip(FlipVertically); }
+    void rotateLeft() { rotate(RotateLeft); }
+    void rotateRight() { rotate(RotateRight); }
 
-    void flipStampHorizontally();
-    void flipStampVertically();
-    void rotateStampLeft();
-    void rotateStampRight();
+    void flip(FlipDirection direction);
+    void rotate(RotateDirection direction);
 
     void setStampBrush(const TileLayer *tiles);
     void setTerrainBrush(const Terrain *terrain);
+    void saveQuickStamp(int index);
     void updateStatusInfoLabel(const QString &statusInfo);
 
     void mapDocumentChanged(MapDocument *mapDocument);
@@ -158,15 +168,21 @@ public slots:
 
     void autoMappingError();
     void autoMappingWarning();
+
+    void onAnimationEditorClosed();
+    void onCollisionEditorClosed();
+
 private:
     /**
-      * Asks the user whether the current map should be saved when necessary.
+      * Asks the user whether the given \a mapDocument should be saved, when
+      * necessary. If it needs to ask, also makes sure that it is the current
+      * document.
       *
       * @return <code>true</code> when any unsaved data is either discarded or
       *         saved, <code>false</code> when the user cancelled or saving
       *         failed.
       */
-    bool confirmSave();
+    bool confirmSave(MapDocument *mapDocument);
 
     /**
       * Checks all maps for changes, if so, ask if to save these changes.
@@ -191,14 +207,7 @@ private:
     QStringList recentFiles() const;
     QString fileDialogStartLocation() const;
 
-    /**
-     * Add the given file to the recent files list.
-     */
     void setRecentFile(const QString &fileName);
-
-    /**
-     * Update the recent files menu.
-     */
     void updateRecentFiles();
 
     void retranslateUi();
@@ -207,9 +216,14 @@ private:
     MapDocument *mMapDocument;
     MapDocumentActionHandler *mActionHandler;
     LayerDock *mLayerDock;
+    MapsDock *mMapsDock;
     ObjectsDock *mObjectsDock;
     TilesetDock *mTilesetDock;
     TerrainDock *mTerrainDock;
+    MiniMapDock* mMiniMapDock;
+    ConsoleDock *mConsoleDock;
+    TileAnimationEditor *mTileAnimationEditor;
+    TileCollisionEditor *mTileCollisionEditor;
     QLabel *mCurrentLayerLabel;
     Zoomable *mZoomable;
     QComboBox *mZoomComboBox;
@@ -222,16 +236,20 @@ private:
     BucketFillTool *mBucketFillTool;
     TerrainBrush *mTerrainBrush;
 
-    ClipboardManager *mClipboardManager;
-
     enum { MaxRecentFiles = 8 };
     QAction *mRecentFiles[MaxRecentFiles];
 
     QMenu *mLayerMenu;
+    QAction *mViewsAndToolbarsMenu;
+    QAction *mShowTileAnimationEditor;
+    QAction *mShowTileCollisionEditor;
 
     void setupQuickStamps();
 
+    AutomappingManager *mAutomappingManager;
     DocumentManager *mDocumentManager;
+    QuickStampManager *mQuickStampManager;
+    ToolManager *mToolManager;
 };
 
 } // namespace Internal

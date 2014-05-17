@@ -42,6 +42,7 @@ public class MapObject implements Cloneable
     private Properties properties = new Properties();
     private ObjectGroup objectGroup;
     private Rectangle bounds = new Rectangle();
+    private Shape shape = new Rectangle();
     private String name = "Object";
     private String type = "";
     private String imageSource = "";
@@ -52,6 +53,7 @@ public class MapObject implements Cloneable
         bounds = new Rectangle(x, y, width, height);
     }
 
+    @Override
     public Object clone() throws CloneNotSupportedException {
         MapObject clone = (MapObject) super.clone();
         clone.bounds = new Rectangle(bounds);
@@ -82,6 +84,14 @@ public class MapObject implements Cloneable
 
     public void setBounds(Rectangle bounds) {
         this.bounds = bounds;
+    }
+
+    public Shape getShape() {
+        return shape;
+    }
+
+    public void setShape(Shape shape) {
+        this.shape = shape;
     }
 
     public String getImageSource() {
@@ -192,6 +202,7 @@ public class MapObject implements Cloneable
         properties = p;
     }
 
+    @Override
     public String toString() {
         return type + " (" + getX() + "," + getY() + ")";
     }

@@ -65,11 +65,11 @@ public:
         setCursor(Qt::SizeAllCursor);
     }
 
+    MapObjectItem *mapObjectItem() const { return mMapObjectItem; }
     MapObject *mapObject() const { return mMapObjectItem->mapObject(); }
 
     int pointIndex() const { return mPointIndex; }
 
-    QPointF pointPosition() const;
     void setPointPosition(const QPointF &pos);
 
     // These hide the QGraphicsItem members
@@ -89,12 +89,6 @@ private:
 
 } // namespace Internal
 } // namespace Tiled
-
-QPointF PointHandle::pointPosition() const
-{
-    MapObject *mapObject = mMapObjectItem->mapObject();
-    return mapObject->polygon().at(mPointIndex) + mapObject->position();
-}
 
 void PointHandle::setPointPosition(const QPointF &pos)
 {
@@ -191,7 +185,8 @@ void EditPolygonTool::mouseMoved(const QPointF &pos,
     AbstractObjectTool::mouseMoved(pos, modifiers);
 
     if (mMode == NoMode && mMousePressed) {
-        const int dragDistance = (mStart - pos).manhattanLength();
+        QPoint screenPos = QCursor::pos();
+        const int dragDistance = (mScreenStart - screenPos).manhattanLength();
         if (dragDistance >= QApplication::startDragDistance()) {
             if (mClickedHandle)
                 startMoving();
@@ -231,6 +226,7 @@ void EditPolygonTool::mousePressed(QGraphicsSceneMouseEvent *event)
     case Qt::LeftButton: {
         mMousePressed = true;
         mStart = event->scenePos();
+        mScreenStart = event->screenPos();
 
         const QList<QGraphicsItem *> items = mapScene()->items(mStart);
         mClickedObjectItem = first<MapObjectItem>(items);
@@ -362,7 +358,7 @@ void EditPolygonTool::updateHandles()
 
     foreach (MapObjectItem *item, selection) {
         const MapObject *object = item->mapObject();
-        if (object->tile())
+        if (!object->cell().isEmpty())
             continue;
 
         QPolygonF polygon = object->polygon();
@@ -388,8 +384,9 @@ void EditPolygonTool::updateHandles()
         // Update the position of all handles
         for (int i = 0; i < pointHandles.size(); ++i) {
             const QPointF &point = polygon.at(i);
-            const QPointF handlePos = renderer->tileToPixelCoords(point);
-            pointHandles.at(i)->setPos(handlePos);
+            const QPointF handlePos = renderer->pixelToScreenCoords(point);
+            const QPointF internalHandlePos = handlePos - item->pos();
+            pointHandles.at(i)->setPos(item->mapToScene(internalHandlePos));
         }
 
         mHandles.insert(item, pointHandles);
@@ -470,14 +467,16 @@ void EditPolygonTool::startMoving()
 
     mMode = Moving;
 
+    MapRenderer *renderer = mapDocument()->renderer();
+
     // Remember the current object positions
     mOldHandlePositions.clear();
     mOldPolygons.clear();
-    mAlignPosition = (*mSelectedHandles.begin())->pointPosition();
+    mAlignPosition = renderer->screenToPixelCoords((*mSelectedHandles.begin())->pos());
 
     foreach (PointHandle *handle, mSelectedHandles) {
-        const QPointF pos = handle->pointPosition();
-        mOldHandlePositions += handle->pos();
+        const QPointF pos = renderer->screenToPixelCoords(handle->pos());
+        mOldHandlePositions.append(handle->pos());
         if (pos.x() < mAlignPosition.x())
             mAlignPosition.setX(pos.x());
         if (pos.y() < mAlignPosition.y())
@@ -496,26 +495,33 @@ void EditPolygonTool::updateMovingItems(const QPointF &pos,
     QPointF diff = pos - mStart;
 
     bool snapToGrid = Preferences::instance()->snapToGrid();
-    if (modifiers & Qt::ControlModifier)
+    bool snapToFineGrid = Preferences::instance()->snapToFineGrid();
+    if (modifiers & Qt::ControlModifier) {
         snapToGrid = !snapToGrid;
+        snapToFineGrid = false;
+    }
 
-    if (snapToGrid) {
-        const QPointF alignPixelPos =
-                renderer->tileToPixelCoords(mAlignPosition);
-        const QPointF newAlignPixelPos = alignPixelPos + diff;
+    if (snapToGrid || snapToFineGrid) {
+        int scale = snapToFineGrid ? Preferences::instance()->gridFine() : 1;
+        const QPointF alignScreenPos =
+                renderer->pixelToScreenCoords(mAlignPosition);
+        const QPointF newAlignPixelPos = alignScreenPos + diff;
 
         // Snap the position to the grid
-        const QPointF newTileCoords =
-                renderer->pixelToTileCoords(newAlignPixelPos).toPoint();
-        diff = renderer->tileToPixelCoords(newTileCoords) - alignPixelPos;
+        QPointF newTileCoords =
+                (renderer->screenToTileCoords(newAlignPixelPos) * scale).toPoint();
+        newTileCoords /= scale;
+        diff = renderer->tileToScreenCoords(newTileCoords) - alignScreenPos;
     }
 
     int i = 0;
     foreach (PointHandle *handle, mSelectedHandles) {
+        const MapObjectItem *item = handle->mapObjectItem();
         const QPointF newPixelPos = mOldHandlePositions.at(i) + diff;
-        const QPointF newPos = renderer->pixelToTileCoords(newPixelPos);
+        const QPointF newInternalPos = item->mapFromScene(newPixelPos);
+        const QPointF newScenePos = item->pos() + newInternalPos;
         handle->setPos(newPixelPos);
-        handle->setPointPosition(newPos);
+        handle->setPointPosition(renderer->screenToPixelCoords(newScenePos));
         ++i;
     }
 }

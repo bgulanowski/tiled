@@ -29,28 +29,13 @@
 #include "tileselectiontool.h"
 #include "tileset.h"
 #include "tilesetmanager.h"
-#include "toolmanager.h"
 
 using namespace Tiled;
 using namespace Tiled::Internal;
 
-QuickStampManager *QuickStampManager::mInstance = 0;
-
-QuickStampManager *QuickStampManager::instance()
-{
-    if (!mInstance)
-        mInstance = new QuickStampManager;
-    return mInstance;
-}
-
-void QuickStampManager::deleteInstance()
-{
-    delete mInstance;
-    mInstance = 0;
-}
-
-QuickStampManager::QuickStampManager() :
-    mMapDocument(0)
+QuickStampManager::QuickStampManager(QObject *parent)
+    : QObject(parent)
+    , mMapDocument(0)
 {
     mQuickStamps.resize(keys().length());
 }
@@ -60,7 +45,7 @@ QuickStampManager::~QuickStampManager()
     cleanQuickStamps();
 }
 
-void QuickStampManager::saveQuickStamp(int index)
+void QuickStampManager::saveQuickStamp(int index, AbstractTool *selectedTool)
 {
     if (!mMapDocument)
         return;
@@ -68,7 +53,6 @@ void QuickStampManager::saveQuickStamp(int index)
     const Map *map = mMapDocument->map();
 
     // The source of the saved stamp depends on which tool is selected
-    AbstractTool *selectedTool = ToolManager::instance()->selectedTool();
     TileLayer *copy = 0;
     if (dynamic_cast<StampBrush*>(selectedTool)) {
         TileLayer *stamp = (static_cast<StampBrush*>(selectedTool))->stamp();
@@ -113,7 +97,7 @@ void QuickStampManager::saveQuickStamp(int index)
     }
 
     eraseQuickStamp(index);
-    mQuickStamps.replace(index, copyMap);
+    mQuickStamps[index] = copyMap;
 }
 
 void QuickStampManager::cleanQuickStamps()

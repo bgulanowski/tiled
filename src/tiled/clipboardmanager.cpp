@@ -20,10 +20,14 @@
 
 #include "clipboardmanager.h"
 
+#include "addremovemapobject.h"
 #include "map.h"
 #include "mapdocument.h"
 #include "mapobject.h"
+#include "maprenderer.h"
+#include "mapview.h"
 #include "objectgroup.h"
+#include "preferences.h"
 #include "tmxmapreader.h"
 #include "tmxmapwriter.h"
 #include "tile.h"
@@ -33,20 +37,35 @@
 #include <QClipboard>
 #include <QMimeData>
 #include <QSet>
+#include <QUndoStack>
 
 static const char * const TMX_MIMETYPE = "text/tmx";
 
 using namespace Tiled;
 using namespace Tiled::Internal;
 
-ClipboardManager::ClipboardManager(QObject *parent) :
-    QObject(parent),
+ClipboardManager *ClipboardManager::mInstance = 0;
+
+ClipboardManager::ClipboardManager() :
     mHasMap(false)
 {
     mClipboard = QApplication::clipboard();
     connect(mClipboard, SIGNAL(dataChanged()), SLOT(updateHasMap()));
 
     updateHasMap();
+}
+
+ClipboardManager *ClipboardManager::instance()
+{
+    if (!mInstance)
+        mInstance = new ClipboardManager;
+    return mInstance;
+}
+
+void ClipboardManager::deleteInstance()
+{
+    delete mInstance;
+    mInstance = 0;
 }
 
 Map *ClipboardManager::map() const
@@ -108,6 +127,64 @@ void ClipboardManager::copySelection(const MapDocument *mapDocument)
     copyMap.addLayer(copyLayer);
 
     setMap(&copyMap);
+}
+
+void ClipboardManager::pasteObjectGroup(const ObjectGroup *objectGroup,
+                                        MapDocument *mapDocument,
+                                        const MapView *view,
+                                        PasteMode mode)
+{
+    Layer *currentLayer = mapDocument->currentLayer();
+    if (!currentLayer)
+        return;
+
+    ObjectGroup *currentObjectGroup = currentLayer->asObjectGroup();
+    if (!currentObjectGroup)
+        return;
+
+    // Determine where to insert the objects
+    const MapRenderer *renderer = mapDocument->renderer();
+    const QPointF center = objectGroup->objectsBoundingRect().center();
+    const QPointF tileCenter = renderer->pixelToTileCoords(center);
+
+    // Take the mouse position if the mouse is on the view, otherwise
+    // take the center of the view.
+    QPoint viewPos;
+    if (view->underMouse())
+        viewPos = view->mapFromGlobal(QCursor::pos());
+    else
+        viewPos = QPoint(view->width() / 2, view->height() / 2);
+
+    const QPointF scenePos = view->mapToScene(viewPos);
+    QPointF insertPos = renderer->screenToTileCoords(scenePos) - tileCenter;
+    if (Preferences::instance()->snapToFineGrid()) {
+        int gridFine = Preferences::instance()->gridFine();
+        insertPos = (insertPos * gridFine).toPoint();
+        insertPos /= gridFine;
+    } else if (Preferences::instance()->snapToGrid()) {
+        insertPos = insertPos.toPoint();
+    }
+    const QPointF offset = renderer->tileToPixelCoords(insertPos);
+
+    QUndoStack *undoStack = mapDocument->undoStack();
+    QList<MapObject*> pastedObjects;
+    pastedObjects.reserve(objectGroup->objectCount());
+
+    undoStack->beginMacro(tr("Paste Objects"));
+    foreach (const MapObject *mapObject, objectGroup->objects()) {
+        if (mode == NoTileObjects && !mapObject->cell().isEmpty())
+            continue;
+
+        MapObject *objectClone = mapObject->clone();
+        objectClone->setPosition(objectClone->position() + offset);
+        pastedObjects.append(objectClone);
+        undoStack->push(new AddMapObject(mapDocument,
+                                         currentObjectGroup,
+                                         objectClone));
+    }
+    undoStack->endMacro();
+
+    mapDocument->setSelectedObjects(pastedObjects);
 }
 
 void ClipboardManager::updateHasMap()

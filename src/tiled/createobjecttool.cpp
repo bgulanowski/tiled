@@ -34,6 +34,7 @@
 #include "utils.h"
 
 #include <QApplication>
+#include <QKeyEvent>
 #include <QPalette>
 
 using namespace Tiled;
@@ -41,7 +42,7 @@ using namespace Tiled::Internal;
 
 CreateObjectTool::CreateObjectTool(CreationMode mode, QObject *parent)
     : AbstractObjectTool(QString(),
-          QIcon(QLatin1String(":images/24x24/insert-object.png")),
+          QIcon(QLatin1String(":images/24x24/insert-rectangle.png")),
           QKeySequence(tr("O")),
           parent)
     , mNewMapObjectItem(0)
@@ -52,8 +53,8 @@ CreateObjectTool::CreateObjectTool(CreationMode mode, QObject *parent)
     , mMode(mode)
 {
     switch (mMode) {
-    case CreateArea:
-        Utils::setThemeIcon(this, "insert-object");
+    case CreateRectangle:
+        Utils::setThemeIcon(this, "insert-rectangle");
         break;
 
     case CreateTile:
@@ -78,6 +79,10 @@ CreateObjectTool::CreateObjectTool(CreationMode mode, QObject *parent)
         mOverlayObjectGroup->setColor(highlight);
         break;
     }
+    case CreateEllipse:
+        setIcon(QIcon(QLatin1String(":images/24x24/insert-ellipse.png")));
+        Utils::setThemeIcon(this, "insert-ellipse");
+        break;
     }
 
     languageChanged();
@@ -96,6 +101,30 @@ void CreateObjectTool::deactivate(MapScene *scene)
     AbstractObjectTool::deactivate(scene);
 }
 
+void CreateObjectTool::keyPressed(QKeyEvent *event)
+{
+    switch (event->key()) {
+    case Qt::Key_Enter:
+    case Qt::Key_Return:
+        if (mNewMapObjectItem) {
+            if (mMode == CreatePolygon || mMode == CreatePolyline)
+                finishOrCancelPolygon();
+            else
+                finishNewMapObject();
+            return;
+        }
+        break;
+    case Qt::Key_Escape:
+        if (mNewMapObjectItem) {
+            cancelNewMapObject();
+            return;
+        }
+        break;
+    }
+
+    AbstractObjectTool::keyPressed(event);
+}
+
 void CreateObjectTool::mouseEntered()
 {
 }
@@ -111,47 +140,77 @@ void CreateObjectTool::mouseMoved(const QPointF &pos,
     const MapRenderer *renderer = mapDocument()->renderer();
 
     bool snapToGrid = Preferences::instance()->snapToGrid();
-    if (modifiers & Qt::ControlModifier)
+    bool snapToFineGrid = Preferences::instance()->snapToFineGrid();
+    if (modifiers & Qt::ControlModifier) {
         snapToGrid = !snapToGrid;
+        snapToFineGrid = false;
+    }
 
     switch (mMode) {
-    case CreateArea: {
-        const QPointF tileCoords = renderer->pixelToTileCoords(pos);
+    case CreateRectangle:
+    case CreateEllipse: {
+        const QPointF pixelCoords = renderer->screenToPixelCoords(pos);
 
         // Update the size of the new map object
         const QPointF objectPos = mNewMapObjectItem->mapObject()->position();
-        QSizeF newSize(qMax(qreal(0), tileCoords.x() - objectPos.x()),
-                       qMax(qreal(0), tileCoords.y() - objectPos.y()));
+        QPointF newSize(qMax(qreal(0), pixelCoords.x() - objectPos.x()),
+                        qMax(qreal(0), pixelCoords.y() - objectPos.y()));
+        QPointF newTileSize = renderer->pixelToTileCoords(newSize);
 
-        if (snapToGrid)
-            newSize = newSize.toSize();
+        if (snapToFineGrid) {
+            int gridFine = Preferences::instance()->gridFine();
+            newTileSize = (newTileSize * gridFine).toPoint();
+            newTileSize /= gridFine;
+        } else if (snapToGrid)
+            newTileSize = newTileSize.toPoint();
 
-        mNewMapObjectItem->resize(newSize);
+        // Holding shift creates circle or square
+        if (modifiers & Qt::ShiftModifier) {
+            qreal max = qMax(newTileSize.x(), newTileSize.y());
+            newTileSize.setX(max);
+            newTileSize.setY(max);
+        }
+        
+        newSize = renderer->tileToPixelCoords(newTileSize);
+        
+        mNewMapObjectItem->resizeObject(QSizeF(newSize.x(), newSize.y()));
         break;
     }
     case CreateTile: {
-        const QSize imgSize = mNewMapObjectItem->mapObject()->tile()->size();
+        const QSize imgSize = mNewMapObjectItem->mapObject()->cell().tile->size();
         const QPointF diff(-imgSize.width() / 2, imgSize.height() / 2);
-        QPointF tileCoords = renderer->pixelToTileCoords(pos + diff);
+        QPointF tileCoords = renderer->screenToTileCoords(pos + diff);
 
-        if (snapToGrid)
+        if (snapToFineGrid) {
+            int gridFine = Preferences::instance()->gridFine();
+            tileCoords = (tileCoords * gridFine).toPoint();
+            tileCoords /= gridFine;
+        } else if (snapToGrid)
             tileCoords = tileCoords.toPoint();
+        
+        QPointF pixelCoords = renderer->tileToPixelCoords(tileCoords);
 
-        mNewMapObjectItem->mapObject()->setPosition(tileCoords);
+        mNewMapObjectItem->mapObject()->setPosition(pixelCoords);
         mNewMapObjectItem->syncWithMapObject();
+        mNewMapObjectItem->setZValue(10000); // sync may change it
         break;
     }
     case CreatePolygon:
     case CreatePolyline: {
-        QPointF tileCoords = renderer->pixelToTileCoords(pos);
+        QPointF tileCoords = renderer->screenToTileCoords(pos);
 
-        if (snapToGrid)
+        if (snapToFineGrid) {
+            int gridFine = Preferences::instance()->gridFine();
+            tileCoords = (tileCoords * gridFine).toPoint();
+            tileCoords /= gridFine;
+        } else if (snapToGrid)
             tileCoords = tileCoords.toPoint();
-
-        tileCoords -= mNewMapObjectItem->mapObject()->position();
+        
+        QPointF pixelCoords = renderer->tileToPixelCoords(tileCoords);
+        pixelCoords -= mNewMapObjectItem->mapObject()->position();
 
         QPolygonF polygon = mOverlayPolygonObject->polygon();
-        polygon.last() = tileCoords;
+        polygon.last() = pixelCoords;
         mOverlayPolygonItem->setPolygon(polygon);
         break;
     }
@@ -163,21 +222,16 @@ void CreateObjectTool::mousePressed(QGraphicsSceneMouseEvent *event)
     // Check if we are already creating a new map object
     if (mNewMapObjectItem) {
         switch (mMode) {
-        case CreateArea:
+        case CreateRectangle:
         case CreateTile:
+        case CreateEllipse:
             if (event->button() == Qt::RightButton)
                 cancelNewMapObject();
             break;
         case CreatePolygon:
         case CreatePolyline:
             if (event->button() == Qt::RightButton) {
-                // The polygon needs to have at least three points and a
-                // polyline needs at least two.
-                int min = mMode == CreatePolygon ? 3 : 2;
-                if (mNewMapObjectItem->mapObject()->polygon().size() >= min)
-                    finishNewMapObject();
-                else
-                    cancelNewMapObject();
+                finishOrCancelPolygon();
             } else if (event->button() == Qt::LeftButton) {
                 QPolygonF current = mNewMapObjectItem->mapObject()->polygon();
                 QPolygonF next = mOverlayPolygonObject->polygon();
@@ -215,25 +269,34 @@ void CreateObjectTool::mousePressed(QGraphicsSceneMouseEvent *event)
             return;
 
         const QPointF diff(-mTile->width() / 2, mTile->height() / 2);
-        tileCoords = renderer->pixelToTileCoords(event->scenePos() + diff);
+        tileCoords = renderer->screenToTileCoords(event->scenePos() + diff);
     } else {
-        tileCoords = renderer->pixelToTileCoords(event->scenePos());
+        tileCoords = renderer->screenToTileCoords(event->scenePos());
     }
 
     bool snapToGrid = Preferences::instance()->snapToGrid();
-    if (event->modifiers() & Qt::ControlModifier)
+    bool snapToFineGrid = Preferences::instance()->snapToFineGrid();
+    if (event->modifiers() & Qt::ControlModifier) {
         snapToGrid = !snapToGrid;
+        snapToFineGrid = false;
+    }
 
-    if (snapToGrid)
+    if (snapToFineGrid) {
+        int gridFine = Preferences::instance()->gridFine();
+        tileCoords = (tileCoords * gridFine).toPoint();
+        tileCoords /= gridFine;
+    } else if (snapToGrid)
         tileCoords = tileCoords.toPoint();
+    
+    const QPointF pixelCoords = renderer->tileToPixelCoords(tileCoords);
 
-    startNewMapObject(tileCoords, objectGroup);
+    startNewMapObject(pixelCoords, objectGroup);
 }
 
 void CreateObjectTool::mouseReleased(QGraphicsSceneMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton && mNewMapObjectItem) {
-        if (mMode == CreateArea || mMode == CreateTile)
+        if (mMode == CreateRectangle || mMode == CreateTile || mMode == CreateEllipse)
             finishNewMapObject();
     }
 }
@@ -241,9 +304,13 @@ void CreateObjectTool::mouseReleased(QGraphicsSceneMouseEvent *event)
 void CreateObjectTool::languageChanged()
 {
     switch (mMode) {
-    case CreateArea:
-        setName(tr("Insert Object"));
-        setShortcut(QKeySequence(tr("O")));
+    case CreateRectangle:
+        setName(tr("Insert Rectangle"));
+        setShortcut(QKeySequence(tr("R")));
+        break;
+    case CreateEllipse:
+        setName(tr("Insert Ellipse"));
+        setShortcut(QKeySequence(tr("C")));
         break;
     case CreateTile:
         setName(tr("Insert Tile"));
@@ -272,7 +339,7 @@ void CreateObjectTool::startNewMapObject(const QPointF &pos,
     newMapObject->setPosition(pos);
 
     if (mMode == CreateTile)
-        newMapObject->setTile(mTile);
+        newMapObject->setCell(Cell(mTile));
 
     if (mMode == CreatePolygon || mMode == CreatePolyline) {
         MapObject::Shape shape = mMode == CreatePolygon ? MapObject::Polygon
@@ -292,9 +359,13 @@ void CreateObjectTool::startNewMapObject(const QPointF &pos,
         mapScene()->addItem(mOverlayPolygonItem);
     }
 
+    if (mMode == CreateEllipse)
+        newMapObject->setShape(MapObject::Ellipse);
+
     objectGroup->addObject(newMapObject);
 
     mNewMapObjectItem = new MapObjectItem(newMapObject, mapDocument());
+    mNewMapObjectItem->setZValue(10000); // same as the BrushItem
     mapScene()->addItem(mNewMapObjectItem);
 }
 
@@ -332,4 +403,15 @@ void CreateObjectTool::finishNewMapObject()
     mapDocument()->undoStack()->push(new AddMapObject(mapDocument(),
                                                       objectGroup,
                                                       newMapObject));
+}
+
+void CreateObjectTool::finishOrCancelPolygon()
+{
+    // The polygon needs to have at least three points and a
+    // polyline needs at least two.
+    int min = mMode == CreatePolygon ? 3 : 2;
+    if (mNewMapObjectItem->mapObject()->polygon().size() >= min)
+        finishNewMapObject();
+    else
+        cancelNewMapObject();
 }

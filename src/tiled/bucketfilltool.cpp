@@ -43,7 +43,10 @@ BucketFillTool::BucketFillTool(QObject *parent)
                        parent)
     , mStamp(0)
     , mFillOverlay(0)
+    , mIsActive(false)
+    , mLastShiftStatus(false)
     , mIsRandom(false)
+    , mLastRandomStatus(false)
 {
 }
 
@@ -56,13 +59,17 @@ BucketFillTool::~BucketFillTool()
 void BucketFillTool::activate(MapScene *scene)
 {
     AbstractTileTool::activate(scene);
+
+    mIsActive = true;
     tilePositionChanged(tilePosition());
 }
 
 void BucketFillTool::deactivate(MapScene *scene)
 {
     AbstractTileTool::deactivate(scene);
+
     mFillRegion = QRegion();
+    mIsActive = false;
 }
 
 void BucketFillTool::tilePositionChanged(const QPoint &tilePos)
@@ -108,7 +115,7 @@ void BucketFillTool::tilePositionChanged(const QPoint &tilePos)
             // If holding shift, the region is the selection bounds
             mFillRegion = mapDocument()->tileSelection();
 
-            // Fill region is the whole map is there is no selection
+            // Fill region is the whole map if there is no selection
             if (mFillRegion.isEmpty())
                 mFillRegion = tileLayer->bounds();
 
@@ -123,16 +130,19 @@ void BucketFillTool::tilePositionChanged(const QPoint &tilePos)
     if (mFillRegion.isEmpty())
         return;
 
-    if (mLastRandomStatus != mIsRandom)
+    if (mLastRandomStatus != mIsRandom) {
+        mLastRandomStatus = mIsRandom;
         fillRegionChanged = true;
+    }
 
     if (!mFillOverlay) {
         // Create a new overlay region
+        const QRect fillBounds = mFillRegion.boundingRect();
         mFillOverlay = new TileLayer(QString(),
-                                     tileLayer->x(),
-                                     tileLayer->y(),
-                                     tileLayer->width(),
-                                     tileLayer->height());
+                                     fillBounds.x(),
+                                     fillBounds.y(),
+                                     fillBounds.width(),
+                                     fillBounds.height());
     }
 
     // Paint the new overlay
@@ -148,15 +158,8 @@ void BucketFillTool::tilePositionChanged(const QPoint &tilePos)
     }
 
     if (fillRegionChanged) {
-        // Crop the overlay to the smallest possible size
-        const QRect fillBounds = mFillRegion.boundingRect();
-        mFillOverlay->resize(fillBounds.size(), -fillBounds.topLeft());
-        mFillOverlay->setX(fillBounds.x());
-        mFillOverlay->setY(fillBounds.y());
-
         // Update the brush item to draw the overlay
         brushItem()->setTileLayer(mFillOverlay);
-        mLastRandomStatus = mIsRandom;
     }
     // Create connections to know when the overlay should be cleared
     makeConnections();
@@ -221,7 +224,8 @@ void BucketFillTool::setStamp(TileLayer *stamp)
     if (mIsRandom)
         updateRandomList();
 
-    tilePositionChanged(tilePosition());
+    if (mIsActive && brushItem()->isVisible())
+        tilePositionChanged(tilePosition());
 }
 
 void BucketFillTool::clearOverlay()

@@ -47,19 +47,19 @@
 #include "mapdocument.h"
 #include "mapdocumentactionhandler.h"
 #include "mapobject.h"
-#include "mappropertiesdialog.h"
 #include "maprenderer.h"
+#include "mapsdock.h"
 #include "mapscene.h"
 #include "newmapdialog.h"
 #include "newtilesetdialog.h"
 #include "pluginmanager.h"
-#include "propertiesdialog.h"
 #include "resizedialog.h"
 #include "objectselectiontool.h"
 #include "objectgroup.h"
 #include "offsetmapdialog.h"
 #include "preferences.h"
 #include "preferencesdialog.h"
+#include "propertiesdock.h"
 #include "quickstampmanager.h"
 #include "saveasimagedialog.h"
 #include "stampbrush.h"
@@ -78,11 +78,16 @@
 #include "zoomable.h"
 #include "commandbutton.h"
 #include "objectsdock.h"
+#include "minimapdock.h"
+#include "consoledock.h"
+#include "tileanimationeditor.h"
+#include "tilecollisioneditor.h"
 
-#ifdef Q_WS_MAC
+#ifdef Q_OS_MAC
 #include "macsupport.h"
 #endif
 
+#include <QMimeData>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QFileDialog>
@@ -103,28 +108,33 @@ using namespace Tiled;
 using namespace Tiled::Internal;
 using namespace Tiled::Utils;
 
-MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
+MainWindow::MainWindow(QWidget *parent, Qt::WindowFlags flags)
     : QMainWindow(parent, flags)
     , mUi(new Ui::MainWindow)
     , mMapDocument(0)
     , mActionHandler(new MapDocumentActionHandler(this))
     , mLayerDock(new LayerDock(this))
+    , mMapsDock(new MapsDock(this))
     , mObjectsDock(new ObjectsDock())
     , mTilesetDock(new TilesetDock(this))
     , mTerrainDock(new TerrainDock(this))
+    , mMiniMapDock(new MiniMapDock(this))
+    , mConsoleDock(new ConsoleDock(this))
+    , mTileAnimationEditor(new TileAnimationEditor(this))
+    , mTileCollisionEditor(new TileCollisionEditor(this))
     , mCurrentLayerLabel(new QLabel)
     , mZoomable(0)
     , mZoomComboBox(new QComboBox)
     , mStatusInfoLabel(new QLabel)
-    , mClipboardManager(new ClipboardManager(this))
+    , mAutomappingManager(new AutomappingManager(this))
     , mDocumentManager(DocumentManager::instance())
+    , mQuickStampManager(new QuickStampManager(this))
+    , mToolManager(new ToolManager(this))
 {
     mUi->setupUi(this);
     setCentralWidget(mDocumentManager->widget());
 
-    PluginManager::instance()->loadPlugins();
-
-#ifdef Q_WS_MAC
+#ifdef Q_OS_MAC
     MacSupport::addFullscreen(this);
 #endif
 
@@ -133,8 +143,8 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     QIcon redoIcon(QLatin1String(":images/16x16/edit-redo.png"));
     QIcon undoIcon(QLatin1String(":images/16x16/edit-undo.png"));
 
-    QIcon tiledIcon(QLatin1String(":images/tiled-icon-16.png"));
-    tiledIcon.addFile(QLatin1String(":images/tiled-icon-32.png"));
+    QIcon tiledIcon(QLatin1String(":images/16x16/tiled.png"));
+    tiledIcon.addFile(QLatin1String(":images/32x32/tiled.png"));
     setWindowIcon(tiledIcon);
 
     // Add larger icon versions for actions used in the tool bar
@@ -163,15 +173,28 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     connect(undoGroup, SIGNAL(cleanChanged(bool)), SLOT(updateWindowTitle()));
 
     UndoDock *undoDock = new UndoDock(undoGroup, this);
+    PropertiesDock *propertiesDock = new PropertiesDock(this);
 
     addDockWidget(Qt::RightDockWidgetArea, mLayerDock);
-    addDockWidget(Qt::RightDockWidgetArea, undoDock);
+    addDockWidget(Qt::LeftDockWidgetArea, undoDock);
+    addDockWidget(Qt::LeftDockWidgetArea, mMapsDock);
     addDockWidget(Qt::RightDockWidgetArea, mObjectsDock);
+    addDockWidget(Qt::RightDockWidgetArea, mMiniMapDock);
     addDockWidget(Qt::RightDockWidgetArea, mTerrainDock);
     addDockWidget(Qt::RightDockWidgetArea, mTilesetDock);
-    tabifyDockWidget(undoDock, mObjectsDock);
+    addDockWidget(Qt::RightDockWidgetArea, propertiesDock);
+    addDockWidget(Qt::RightDockWidgetArea, mConsoleDock);
+
+    tabifyDockWidget(mMiniMapDock, mObjectsDock);
     tabifyDockWidget(mObjectsDock, mLayerDock);
     tabifyDockWidget(mTerrainDock, mTilesetDock);
+    tabifyDockWidget(undoDock, mMapsDock);
+
+    // These dock widgets may not be immediately useful to many people, so
+    // they are hidden by default.
+    undoDock->setVisible(false);
+    mMapsDock->setVisible(false);
+    mConsoleDock->setVisible(false);
 
     statusBar()->addPermanentWidget(mZoomComboBox);
 
@@ -189,8 +212,15 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     redoAction->setShortcuts(QKeySequence::Redo);
 
     mUi->actionShowGrid->setChecked(preferences->showGrid());
+    mUi->actionShowTileObjectOutlines->setChecked(preferences->showTileObjectOutlines());
+    mUi->actionShowTileAnimations->setChecked(preferences->showTileAnimations());
     mUi->actionSnapToGrid->setChecked(preferences->snapToGrid());
+    mUi->actionSnapToFineGrid->setChecked(preferences->snapToFineGrid());
     mUi->actionHighlightCurrentLayer->setChecked(preferences->highlightCurrentLayer());
+
+    QShortcut *reloadTilesetsShortcut = new QShortcut(QKeySequence(tr("Ctrl+T")), this);
+    connect(reloadTilesetsShortcut, SIGNAL(activated()),
+            this, SLOT(reloadTilesets()));
 
     // Make sure Ctrl+= also works for zooming in
     QList<QKeySequence> keys = QKeySequence::keyBindings(QKeySequence::ZoomIn);
@@ -234,7 +264,6 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     mLayerMenu->addAction(mActionHandler->actionDuplicateLayer());
     mLayerMenu->addAction(mActionHandler->actionMergeLayerDown());
     mLayerMenu->addAction(mActionHandler->actionRemoveLayer());
-    mLayerMenu->addAction(mActionHandler->actionRenameLayer());
     mLayerMenu->addSeparator();
     mLayerMenu->addAction(mActionHandler->actionSelectPreviousLayer());
     mLayerMenu->addAction(mActionHandler->actionSelectNextLayer());
@@ -268,8 +297,14 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
 
     connect(mUi->actionShowGrid, SIGNAL(toggled(bool)),
             preferences, SLOT(setShowGrid(bool)));
+    connect(mUi->actionShowTileObjectOutlines, SIGNAL(toggled(bool)),
+            preferences, SLOT(setShowTileObjectOutlines(bool)));
+    connect(mUi->actionShowTileAnimations, SIGNAL(toggled(bool)),
+            preferences, SLOT(setShowTileAnimations(bool)));
     connect(mUi->actionSnapToGrid, SIGNAL(toggled(bool)),
             preferences, SLOT(setSnapToGrid(bool)));
+    connect(mUi->actionSnapToFineGrid, SIGNAL(toggled(bool)),
+            preferences, SLOT(setSnapToFineGrid(bool)));
     connect(mUi->actionHighlightCurrentLayer, SIGNAL(toggled(bool)),
             preferences, SLOT(setHighlightCurrentLayer(bool)));
     connect(mUi->actionZoomIn, SIGNAL(triggered()), SLOT(zoomIn()));
@@ -283,10 +318,8 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     connect(mUi->actionOffsetMap, SIGNAL(triggered()), SLOT(offsetMap()));
     connect(mUi->actionMapProperties, SIGNAL(triggered()),
             SLOT(editMapProperties()));
-    connect(mUi->actionAutoMap, SIGNAL(triggered()), SLOT(autoMap()));
-
-    connect(mActionHandler->actionLayerProperties(), SIGNAL(triggered()),
-            SLOT(editLayerProperties()));
+    connect(mUi->actionAutoMap, SIGNAL(triggered()),
+            mAutomappingManager, SLOT(autoMap()));
 
     connect(mUi->actionAbout, SIGNAL(triggered()), SLOT(aboutTiled()));
     connect(mUi->actionAboutQt, SIGNAL(triggered()), qApp, SLOT(aboutQt()));
@@ -333,8 +366,10 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     mBucketFillTool = new BucketFillTool(this);
     CreateObjectTool *tileObjectsTool = new CreateObjectTool(
             CreateObjectTool::CreateTile, this);
-    CreateObjectTool *areaObjectsTool = new CreateObjectTool(
-            CreateObjectTool::CreateArea, this);
+    CreateObjectTool *rectangleObjectsTool = new CreateObjectTool(
+            CreateObjectTool::CreateRectangle, this);
+    CreateObjectTool *ellipseObjectsTool = new CreateObjectTool(
+            CreateObjectTool::CreateEllipse, this);
     CreateObjectTool *polygonObjectsTool = new CreateObjectTool(
             CreateObjectTool::CreatePolygon, this);
     CreateObjectTool *polylineObjectsTool = new CreateObjectTool(
@@ -346,6 +381,10 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
             this, SLOT(setStampBrush(const TileLayer*)));
     connect(mTilesetDock, SIGNAL(currentTileChanged(Tile*)),
             tileObjectsTool, SLOT(setTile(Tile*)));
+    connect(mTilesetDock, SIGNAL(currentTileChanged(Tile*)),
+            mTileAnimationEditor, SLOT(setTile(Tile*)));
+    connect(mTilesetDock, SIGNAL(currentTileChanged(Tile*)),
+            mTileCollisionEditor, SLOT(setTile(Tile*)));
 
     connect(mTerrainDock, SIGNAL(currentTerrainChanged(const Terrain*)),
             this, SLOT(setTerrainBrush(const Terrain*)));
@@ -355,59 +394,79 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     connect(mRandomButton, SIGNAL(toggled(bool)),
             mBucketFillTool, SLOT(setRandom(bool)));
 
-    ToolManager *toolManager = ToolManager::instance();
-    toolManager->registerTool(mStampBrush);
-    toolManager->registerTool(mTerrainBrush);
-    toolManager->registerTool(mBucketFillTool);
-    toolManager->registerTool(new Eraser(this));
-    toolManager->registerTool(new TileSelectionTool(this));
-    toolManager->addSeparator();
-    toolManager->registerTool(new ObjectSelectionTool(this));
-    toolManager->registerTool(new EditPolygonTool(this));
-    toolManager->registerTool(areaObjectsTool);
-    toolManager->registerTool(tileObjectsTool);
-    toolManager->registerTool(polygonObjectsTool);
-    toolManager->registerTool(polylineObjectsTool);
+    QToolBar *toolBar = mUi->toolsToolBar;
+    toolBar->addAction(mToolManager->registerTool(mStampBrush));
+    toolBar->addAction(mToolManager->registerTool(mTerrainBrush));
+    toolBar->addAction(mToolManager->registerTool(mBucketFillTool));
+    toolBar->addAction(mToolManager->registerTool(new Eraser(this)));
+    toolBar->addAction(mToolManager->registerTool(new TileSelectionTool(this)));
+    toolBar->addSeparator();
+    toolBar->addAction(mToolManager->registerTool(new ObjectSelectionTool(this)));
+    toolBar->addAction(mToolManager->registerTool(new EditPolygonTool(this)));
+    toolBar->addAction(mToolManager->registerTool(rectangleObjectsTool));
+    toolBar->addAction(mToolManager->registerTool(ellipseObjectsTool));
+    toolBar->addAction(mToolManager->registerTool(polygonObjectsTool));
+    toolBar->addAction(mToolManager->registerTool(polylineObjectsTool));
+    toolBar->addAction(mToolManager->registerTool(tileObjectsTool));
 
-    addToolBar(toolManager->toolBar());
+    mDocumentManager->setSelectedTool(mToolManager->selectedTool());
+    connect(mToolManager, SIGNAL(selectedToolChanged(AbstractTool*)),
+            mDocumentManager, SLOT(setSelectedTool(AbstractTool*)));
 
     statusBar()->addWidget(mStatusInfoLabel);
-    connect(toolManager, SIGNAL(statusInfoChanged(QString)),
+    connect(mToolManager, SIGNAL(statusInfoChanged(QString)),
             this, SLOT(updateStatusInfoLabel(QString)));
     statusBar()->addWidget(mCurrentLayerLabel);
 
-    mUi->menuView->addSeparator();
-    mUi->menuView->addAction(mTilesetDock->toggleViewAction());
-    mUi->menuView->addAction(mTerrainDock->toggleViewAction());
-    mUi->menuView->addAction(mLayerDock->toggleViewAction());
-    mUi->menuView->addAction(undoDock->toggleViewAction());
-    mUi->menuView->addAction(mObjectsDock->toggleViewAction());
+    // Add the 'Views and Toolbars' submenu. This needs to happen after all
+    // the dock widgets and toolbars have been added to the main window.
+    mViewsAndToolbarsMenu = new QAction(tr("Views and Toolbars"), this);
+    mShowTileAnimationEditor = new QAction(tr("Tile Animation Editor"), this);
+    mShowTileAnimationEditor->setCheckable(true);
+    mShowTileCollisionEditor = new QAction(tr("Tile Collision Editor"), this);
+    mShowTileCollisionEditor->setCheckable(true);
+    QMenu *popupMenu = createPopupMenu();
+    popupMenu->setParent(this);
+    mViewsAndToolbarsMenu->setMenu(popupMenu);
+    mUi->menuView->insertAction(mUi->actionShowGrid, mViewsAndToolbarsMenu);
+    mUi->menuView->insertAction(mUi->actionShowGrid, mShowTileAnimationEditor);
+    mUi->menuView->insertAction(mUi->actionShowGrid, mShowTileCollisionEditor);
+    mUi->menuView->insertSeparator(mUi->actionShowGrid);
 
-    connect(mClipboardManager, SIGNAL(hasMapChanged()), SLOT(updateActions()));
+    connect(mShowTileAnimationEditor, SIGNAL(toggled(bool)),
+            mTileAnimationEditor, SLOT(setVisible(bool)));
+    connect(mTileAnimationEditor, SIGNAL(closed()), SLOT(onAnimationEditorClosed()));
+
+    connect(mShowTileCollisionEditor, SIGNAL(toggled(bool)),
+            mTileCollisionEditor, SLOT(setVisible(bool)));
+    connect(mTileCollisionEditor, SIGNAL(closed()), SLOT(onCollisionEditorClosed()));
+
+    connect(ClipboardManager::instance(), SIGNAL(hasMapChanged()), SLOT(updateActions()));
 
     connect(mDocumentManager, SIGNAL(currentDocumentChanged(MapDocument*)),
             SLOT(mapDocumentChanged(MapDocument*)));
     connect(mDocumentManager, SIGNAL(documentCloseRequested(int)),
             this, SLOT(closeMapDocument(int)));
 
-    QShortcut *switchToLeftDocument = new QShortcut(tr("Ctrl+PgUp"), this);
+    QShortcut *switchToLeftDocument = new QShortcut(tr("Alt+Left"), this);
     connect(switchToLeftDocument, SIGNAL(activated()),
             mDocumentManager, SLOT(switchToLeftDocument()));
     QShortcut *switchToLeftDocument1 = new QShortcut(tr("Ctrl+Shift+Tab"), this);
     connect(switchToLeftDocument1, SIGNAL(activated()),
             mDocumentManager, SLOT(switchToLeftDocument()));
 
-    QShortcut *switchToRightDocument = new QShortcut(tr("Ctrl+PgDown"), this);
+    QShortcut *switchToRightDocument = new QShortcut(tr("Alt+Right"), this);
     connect(switchToRightDocument, SIGNAL(activated()),
             mDocumentManager, SLOT(switchToRightDocument()));
     QShortcut *switchToRightDocument1 = new QShortcut(tr("Ctrl+Tab"), this);
     connect(switchToRightDocument1, SIGNAL(activated()),
             mDocumentManager, SLOT(switchToRightDocument()));
 
-    new QShortcut(tr("X"), this, SLOT(flipStampHorizontally()));
-    new QShortcut(tr("Y"), this, SLOT(flipStampVertically()));
-    new QShortcut(tr("Z"), this, SLOT(rotateStampRight()));
-    new QShortcut(tr("Shift+Z"), this, SLOT(rotateStampLeft()));
+
+    new QShortcut(tr("X"), this, SLOT(flipHorizontally()));
+    new QShortcut(tr("Y"), this, SLOT(flipVertically()));
+    new QShortcut(tr("Z"), this, SLOT(rotateRight()));
+    new QShortcut(tr("Shift+Z"), this, SLOT(rotateLeft()));
 
     QShortcut *copyPositionShortcut = new QShortcut(tr("Alt+C"), this);
     connect(copyPositionShortcut, SIGNAL(activated()),
@@ -417,9 +476,9 @@ MainWindow::MainWindow(QWidget *parent, Qt::WFlags flags)
     readSettings();
     setupQuickStamps();
 
-    connect(AutomappingManager::instance(), SIGNAL(warningsOccurred()),
+    connect(mAutomappingManager, SIGNAL(warningsOccurred()),
             this, SLOT(autoMappingWarning()));
-    connect(AutomappingManager::instance(), SIGNAL(errorsOccurred()),
+    connect(mAutomappingManager, SIGNAL(errorsOccurred()),
             this, SLOT(autoMappingError()));
 }
 
@@ -427,14 +486,19 @@ MainWindow::~MainWindow()
 {
     mDocumentManager->closeAllDocuments();
 
-    AutomappingManager::deleteInstance();
-    QuickStampManager::deleteInstance();
-    ToolManager::deleteInstance();
+    // This needs to happen before deleting the TilesetManager otherwise it may
+    // hold references to tilesets.
+    mTileAnimationEditor->setTile(0);
+    mTileAnimationEditor->writeSettings();
+    mTileCollisionEditor->setTile(0);
+    mTileCollisionEditor->writeSettings();
+
     TilesetManager::deleteInstance();
     DocumentManager::deleteInstance();
     Preferences::deleteInstance();
     LanguageManager::deleteInstance();
     PluginManager::deleteInstance();
+    ClipboardManager::deleteInstance();
 
     delete mUi;
 }
@@ -524,9 +588,9 @@ bool MainWindow::openFile(const QString &fileName,
 
     TmxMapReader tmxMapReader;
 
+    const PluginManager *pm = PluginManager::instance();
     if (!mapReader && !tmxMapReader.supportsFile(fileName)) {
         // Try to find a plugin that implements support for this format
-        const PluginManager *pm = PluginManager::instance();
         QList<MapReaderInterface*> readers =
                 pm->interfaces<MapReaderInterface>();
 
@@ -538,8 +602,16 @@ bool MainWindow::openFile(const QString &fileName,
         }
     }
 
-    if (!mapReader)
+    // check if we can save in that format as well
+    QString writerPluginFileName;
+    if (mapReader) {
+        if (const Plugin *plugin = pm->plugin(mapReader)) {
+            if (qobject_cast<MapWriterInterface*>(plugin->instance))
+                writerPluginFileName = plugin->fileName;
+        }
+    } else {
         mapReader = &tmxMapReader;
+    }
 
     Map *map = mapReader->read(fileName);
     if (!map) {
@@ -548,7 +620,9 @@ bool MainWindow::openFile(const QString &fileName,
         return false;
     }
 
-    addMapDocument(new MapDocument(map, fileName));
+    MapDocument *mapDocument = new MapDocument(map, fileName);
+    mapDocument->setWriterPluginFileName(writerPluginFileName);
+    addMapDocument(mapDocument);
     setRecentFile(fileName);
     return true;
 }
@@ -668,6 +742,9 @@ bool MainWindow::saveFile(const QString &fileName)
     if (!mMapDocument)
         return false;
 
+    if (fileName.isEmpty())
+        return false;
+
     QString error;
     if (!mMapDocument->save(fileName, &error)) {
         QMessageBox::critical(this, tr("Error Saving Map"), error);
@@ -685,21 +762,42 @@ bool MainWindow::saveFile()
 
     const QString currentFileName = mMapDocument->fileName();
 
-    if (currentFileName.endsWith(QLatin1String(".tmx"), Qt::CaseInsensitive))
-        return saveFile(currentFileName);
-    else
+    if (!saveFile(currentFileName))
         return saveFileAs();
+
+    return true;
 }
 
 bool MainWindow::saveFileAs()
 {
+    const QString tmxfilter = tr("Tiled map files (*.tmx)");
+    QString filter = QString(tmxfilter);
+    PluginManager *pm = PluginManager::instance();
+    foreach (const Plugin &plugin, pm->plugins()) {
+        const MapWriterInterface *writer = qobject_cast<MapWriterInterface*>
+                (plugin.instance);
+        const MapReaderInterface *reader = qobject_cast<MapReaderInterface*>
+                (plugin.instance);
+        if (writer && reader) {
+            foreach (const QString &str, writer->nameFilters()) {
+                if (!str.isEmpty()) {
+                    filter += QLatin1String(";;");
+                    filter += str;
+                }
+            }
+        }
+    }
+
+    QString selectedFilter;
+    if (mMapDocument)
+        selectedFilter = mMapDocument->writerPluginFileName();
+
+    if (selectedFilter.isEmpty())
+        selectedFilter = tmxfilter;
+
     QString suggestedFileName;
     if (mMapDocument && !mMapDocument->fileName().isEmpty()) {
-        const QFileInfo fileInfo(mMapDocument->fileName());
-        suggestedFileName = fileInfo.path();
-        suggestedFileName += QLatin1Char('/');
-        suggestedFileName += fileInfo.completeBaseName();
-        suggestedFileName += QLatin1String(".tmx");
+        suggestedFileName = mMapDocument->fileName();
     } else {
         suggestedFileName = fileDialogStartLocation();
         suggestedFileName += QLatin1Char('/');
@@ -708,16 +806,26 @@ bool MainWindow::saveFileAs()
 
     const QString fileName =
             QFileDialog::getSaveFileName(this, QString(), suggestedFileName,
-                                         tr("Tiled map files (*.tmx)"));
-    if (!fileName.isEmpty())
-        return saveFile(fileName);
-    return false;
+                                         filter, &selectedFilter);
+
+    if (fileName.isEmpty())
+        return false;
+
+    QString writerPluginFilename;
+    if (const Plugin *p = pm->pluginByNameFilter(selectedFilter))
+        writerPluginFilename = p->fileName;
+
+    mMapDocument->setWriterPluginFileName(writerPluginFilename);
+
+    return saveFile(fileName);
 }
 
-bool MainWindow::confirmSave()
+bool MainWindow::confirmSave(MapDocument *mapDocument)
 {
-    if (!mMapDocument || !mMapDocument->isModified())
+    if (!mapDocument || !mapDocument->isModified())
         return true;
+
+    mDocumentManager->switchToDocument(mapDocument);
 
     int ret = QMessageBox::warning(
             this, tr("Unsaved Changes"),
@@ -735,9 +843,8 @@ bool MainWindow::confirmSave()
 
 bool MainWindow::confirmAllSave()
 {
-    for (int i = 0; i < mDocumentManager->documentCount(); i++) {
-        mDocumentManager->switchToDocument(i);
-        if (!confirmSave())
+    for (int i = 0; i < mDocumentManager->documentCount(); ++i) {
+        if (!confirmSave(mDocumentManager->documents().at(i)))
             return false;
     }
 
@@ -850,7 +957,7 @@ void MainWindow::exportAs()
 
 void MainWindow::closeFile()
 {
-    if (confirmSave())
+    if (confirmSave(mDocumentManager->currentDocument()))
         mDocumentManager->closeCurrentDocument();
 }
 
@@ -895,7 +1002,7 @@ void MainWindow::copy()
     if (!mMapDocument)
         return;
 
-    mClipboardManager->copySelection(mMapDocument);
+    ClipboardManager::instance()->copySelection(mMapDocument);
 }
 
 void MainWindow::paste()
@@ -907,7 +1014,8 @@ void MainWindow::paste()
     if (!currentLayer)
         return;
 
-    Map *map = mClipboardManager->map();
+    ClipboardManager *clipboardManager = ClipboardManager::instance();
+    QScopedPointer<Map> map(clipboardManager->map());
     if (!map)
         return;
 
@@ -915,64 +1023,26 @@ void MainWindow::paste()
     if (map->layerCount() != 1) {
         // Need to clean up the tilesets since they didn't get an owner
         qDeleteAll(map->tilesets());
-        delete map;
         return;
     }
 
     TilesetManager *tilesetManager = TilesetManager::instance();
     tilesetManager->addReferences(map->tilesets());
 
-    mMapDocument->unifyTilesets(map);
+    mMapDocument->unifyTilesets(map.data());
     Layer *layer = map->layerAt(0);
 
     if (TileLayer *tileLayer = layer->asTileLayer()) {
         // Reset selection and paste into the stamp brush
         mActionHandler->selectNone();
         setStampBrush(tileLayer);
-        ToolManager::instance()->selectTool(mStampBrush);
+        mToolManager->selectTool(mStampBrush);
     } else if (ObjectGroup *objectGroup = layer->asObjectGroup()) {
-        if (ObjectGroup *currentObjectGroup = currentLayer->asObjectGroup()) {
-            // Determine where to insert the objects
-            const QPointF center = objectGroup->objectsBoundingRect().center();
-            const MapView *view = mDocumentManager->currentMapView();
-
-            // Take the mouse position if the mouse is on the view, otherwise
-            // take the center of the view.
-            QPoint viewPos;
-            if (view->underMouse())
-                viewPos = view->mapFromGlobal(QCursor::pos());
-            else
-                viewPos = QPoint(view->width() / 2, view->height() / 2);
-
-            const MapRenderer *renderer = mMapDocument->renderer();
-            const QPointF scenePos = view->mapToScene(viewPos);
-            QPointF insertPos = renderer->pixelToTileCoords(scenePos);
-            if (Preferences::instance()->snapToGrid())
-                insertPos = insertPos.toPoint();
-            const QPointF offset = insertPos - center;
-
-            QUndoStack *undoStack = mMapDocument->undoStack();
-            QList<MapObject*> pastedObjects;
-#if QT_VERSION >= 0x040700
-            pastedObjects.reserve(objectGroup->objectCount());
-#endif
-            undoStack->beginMacro(tr("Paste Objects"));
-            foreach (const MapObject *mapObject, objectGroup->objects()) {
-                MapObject *objectClone = mapObject->clone();
-                objectClone->setPosition(objectClone->position() + offset);
-                pastedObjects.append(objectClone);
-                undoStack->push(new AddMapObject(mMapDocument,
-                                                 currentObjectGroup,
-                                                 objectClone));
-            }
-            undoStack->endMacro();
-
-            mMapDocument->setSelectedObjects(pastedObjects);
-        }
+        const MapView *view = mDocumentManager->currentMapView();
+        clipboardManager->pasteObjectGroup(objectGroup, mMapDocument, view);
     }
 
     tilesetManager->removeReferences(map->tilesets());
-    delete map;
 }
 
 void MainWindow::delete_()
@@ -1057,26 +1127,61 @@ void MainWindow::newTilesets(const QStringList &paths)
             return;
 }
 
+void MainWindow::reloadTilesets()
+{
+    Map *map = mMapDocument->map();
+    if (!map)
+        return;
+
+    TilesetManager *tilesetManager = TilesetManager::instance();
+    foreach (Tileset *tileset, map->tilesets())
+        tilesetManager->forceTilesetReload(tileset);
+}
+
 void MainWindow::addExternalTileset()
 {
     if (!mMapDocument)
         return;
 
     const QString start = fileDialogStartLocation();
-    const QString fileName =
-            QFileDialog::getOpenFileName(this, tr("Add External Tileset"),
-                                         start,
-                                         tr("Tiled tileset files (*.tsx)"));
-    if (fileName.isEmpty())
+    const QStringList fileNames =
+            QFileDialog::getOpenFileNames(this, tr("Add External Tileset(s)"),
+                                          start,
+                                          tr("Tiled tileset files (*.tsx)"));
+    if (fileNames.isEmpty())
         return;
+    
+    QList<Tileset *> tilesets;
 
-    TmxMapReader reader;
-    if (Tileset *tileset = reader.readTileset(fileName)) {
-        mMapDocument->undoStack()->push(new AddTileset(mMapDocument, tileset));
-    } else {
-        QMessageBox::critical(this, tr("Error Reading Tileset"),
-                              reader.errorString());
+    foreach (QString fileName, fileNames) {
+        TmxMapReader reader;
+        if (Tileset *tileset = reader.readTileset(fileName)) {
+            tilesets += tileset;
+        } else if (fileNames.size() == 1) {
+            QMessageBox::critical(this, tr("Error Reading Tileset"),
+                                  reader.errorString());
+            return;
+        } else {
+            int result;
+            
+            result = QMessageBox::warning(this, tr("Error Reading Tileset"),
+                                          tr("%1: %2").arg(fileName, reader.errorString()),
+                                          QMessageBox::Abort | QMessageBox::Ignore,
+                                          QMessageBox::Ignore);
+            
+            if (result == QMessageBox::Abort) {
+                // On abort, clean out any already loaded tilesets.
+                qDeleteAll(tilesets);
+                return;
+            }
+        }
     }
+    
+    QUndoStack *undoStack = mMapDocument->undoStack();
+    undoStack->beginMacro(tr("Add %n Tileset(s)", "", tilesets.size()));
+    foreach (Tileset *tileset, tilesets)
+        undoStack->push(new AddTileset(mMapDocument, tileset));
+    undoStack->endMacro();
 }
 
 void MainWindow::resizeMap()
@@ -1121,32 +1226,34 @@ void MainWindow::editMapProperties()
     if (!mMapDocument)
         return;
 
-    MapPropertiesDialog mapPropertiesDialog(mMapDocument, this);
-
-    mapPropertiesDialog.exec();
-}
-
-void MainWindow::autoMap()
-{
-    AutomappingManager::instance()->autoMap();
-}
-
-void MainWindow::autoMappingWarning()
-{
-    const QString title = tr("Automatic Mapping Warning");
-    QString warnings = AutomappingManager::instance()->warningString();
-    if (!warnings.isEmpty()) {
-        QMessageBox::warning(this, title, warnings);
-    }
+    mMapDocument->setCurrentObject(mMapDocument->map());
+    mMapDocument->emitEditCurrentObject();
 }
 
 void MainWindow::autoMappingError()
 {
     const QString title = tr("Automatic Mapping Error");
-    QString error = AutomappingManager::instance()->errorString();
-    if (!error.isEmpty()) {
+    QString error = mAutomappingManager->errorString();
+    if (!error.isEmpty())
         QMessageBox::critical(this, title, error);
-    }
+}
+
+void MainWindow::autoMappingWarning()
+{
+    const QString title = tr("Automatic Mapping Warning");
+    QString warnings = mAutomappingManager->warningString();
+    if (!warnings.isEmpty())
+        QMessageBox::warning(this, title, warnings);
+}
+
+void MainWindow::onAnimationEditorClosed()
+{
+    mShowTileAnimationEditor->setChecked(false);
+}
+
+void MainWindow::onCollisionEditorClosed()
+{
+    mShowTileCollisionEditor->setChecked(false);
 }
 
 void MainWindow::openRecentFile()
@@ -1168,6 +1275,9 @@ QString MainWindow::fileDialogStartLocation() const
     return (!files.isEmpty()) ? QFileInfo(files.first()).path() : QString();
 }
 
+/**
+ * Adds the given file to the recent files list.
+ */
 void MainWindow::setRecentFile(const QString &fileName)
 {
     // Remember the file by its canonical file path
@@ -1196,6 +1306,9 @@ void MainWindow::clearRecentFiles()
     updateRecentFiles();
 }
 
+/**
+ * Updates the recent files menu.
+ */
 void MainWindow::updateRecentFiles()
 {
     QStringList files = recentFiles();
@@ -1241,7 +1354,7 @@ void MainWindow::updateActions()
     mUi->actionCloseAll->setEnabled(map);
     mUi->actionCut->setEnabled(canCopy);
     mUi->actionCopy->setEnabled(canCopy);
-    mUi->actionPaste->setEnabled(mClipboardManager->hasMap());
+    mUi->actionPaste->setEnabled(ClipboardManager::instance()->hasMap());
     mUi->actionDelete->setEnabled(canCopy);
     mUi->actionNewTileset->setEnabled(map);
     mUi->actionAddExternalTileset->setEnabled(map);
@@ -1279,48 +1392,29 @@ void MainWindow::updateZoomLabel()
     }
 }
 
-void MainWindow::editLayerProperties()
+void MainWindow::flip(FlipDirection direction)
 {
-    if (!mMapDocument)
-        return;
-
-    if (Layer *layer = mMapDocument->currentLayer())
-        PropertiesDialog::showDialogFor(layer, mMapDocument, this);
-}
-
-void MainWindow::flipStampHorizontally()
-{
-    if (TileLayer *stamp = mStampBrush->stamp()) {
-        stamp = static_cast<TileLayer*>(stamp->clone());
-        stamp->flip(TileLayer::FlipHorizontally);
-        setStampBrush(stamp);
+    if (mStampBrush->isEnabled()) {
+        if (TileLayer *stamp = mStampBrush->stamp()) {
+            stamp = static_cast<TileLayer*>(stamp->clone());
+            stamp->flip(direction);
+            setStampBrush(stamp);
+        }
+    } else if (mMapDocument) {
+        mMapDocument->flipSelectedObjects(direction);
     }
 }
 
-void MainWindow::flipStampVertically()
+void MainWindow::rotate(RotateDirection direction)
 {
-    if (TileLayer *stamp = mStampBrush->stamp()) {
-        stamp = static_cast<TileLayer*>(stamp->clone());
-        stamp->flip(TileLayer::FlipVertically);
-        setStampBrush(stamp);
-    }
-}
-
-void MainWindow::rotateStampLeft()
-{
-    if (TileLayer *stamp = mStampBrush->stamp()) {
-        stamp = static_cast<TileLayer*>(stamp->clone());
-        stamp->rotate(TileLayer::RotateLeft);
-        setStampBrush(stamp);
-    }
-}
-
-void MainWindow::rotateStampRight()
-{
-    if (TileLayer *stamp = mStampBrush->stamp()) {
-        stamp = static_cast<TileLayer*>(stamp->clone());
-        stamp->rotate(TileLayer::RotateRight);
-        setStampBrush(stamp);
+    if (mStampBrush->isEnabled()) {
+        if (TileLayer *stamp = mStampBrush->stamp()) {
+            stamp = static_cast<TileLayer*>(stamp->clone());
+            stamp->rotate(direction);
+            setStampBrush(stamp);
+        }
+    } else if (mMapDocument) {
+        mMapDocument->rotateSelectedObjects(direction);
     }
 }
 
@@ -1337,10 +1431,9 @@ void MainWindow::setStampBrush(const TileLayer *tiles)
     mBucketFillTool->setStamp(static_cast<TileLayer*>(tiles->clone()));
 
     // When selecting a new stamp, it makes sense to switch to a stamp tool
-    ToolManager *m = ToolManager::instance();
-    AbstractTool *selectedTool = m->selectedTool();
+    AbstractTool *selectedTool = mToolManager->selectedTool();
     if (selectedTool != mStampBrush && selectedTool != mBucketFillTool)
-        m->selectTool(mStampBrush);
+        mToolManager->selectTool(mStampBrush);
 }
 
 /**
@@ -1351,10 +1444,14 @@ void MainWindow::setTerrainBrush(const Terrain *terrain)
     mTerrainBrush->setTerrain(terrain);
 
     // When selecting a new terrain, it makes sense to switch to a terrain brush tool
-    ToolManager *m = ToolManager::instance();
-    AbstractTool *selectedTool = m->selectedTool();
+    AbstractTool *selectedTool = mToolManager->selectedTool();
     if (selectedTool != mTerrainBrush)
-        m->selectTool(mTerrainBrush);
+        mToolManager->selectTool(mTerrainBrush);
+}
+
+void MainWindow::saveQuickStamp(int index)
+{
+    mQuickStampManager->saveQuickStamp(index, mToolManager->selectedTool());
 }
 
 void MainWindow::updateStatusInfoLabel(const QString &statusInfo)
@@ -1379,10 +1476,10 @@ void MainWindow::writeSettings()
     QStringList scrollY;
     QStringList selectedLayer;
     for (int i = 0; i < mDocumentManager->documentCount(); i++) {
-        mDocumentManager->switchToDocument(i);
-        fileList.append(mDocumentManager->currentDocument()->fileName());
-        MapView *mapView = mDocumentManager->currentMapView();
-        const int currentLayerIndex = mMapDocument->currentLayerIndex();
+        MapDocument *document = mDocumentManager->documents().at(i);
+        MapView *mapView = mDocumentManager->viewForDocument(document);
+        fileList.append(document->fileName());
+        const int currentLayerIndex = document->currentLayerIndex();
 
         mapScales.append(QString::number(mapView->zoomable()->scale()));
         scrollX.append(QString::number(
@@ -1406,7 +1503,7 @@ void MainWindow::readSettings()
     if (!geom.isEmpty())
         restoreGeometry(geom);
     else
-        resize(800, 600);
+        resize(1000, 700);
     restoreState(mSettings.value(QLatin1String("state"),
                                  QByteArray()).toByteArray());
     mSettings.endGroup();
@@ -1433,13 +1530,6 @@ void MainWindow::addMapDocument(MapDocument *mapDocument)
     MapView *mapView = mDocumentManager->currentMapView();
     connect(mapView->zoomable(), SIGNAL(scaleChanged(qreal)),
             this, SLOT(updateZoomLabel()));
-
-    Preferences *prefs = Preferences::instance();
-
-    MapScene *mapScene = mapView->mapScene();
-    mapScene->setGridVisible(prefs->showGrid());
-    connect(prefs, SIGNAL(showGridChanged(bool)),
-            mapScene, SLOT(setGridVisible(bool)));
 }
 
 void MainWindow::aboutTiled()
@@ -1454,7 +1544,11 @@ void MainWindow::retranslateUi()
 
     mRandomButton->setToolTip(tr("Random Mode"));
     mLayerMenu->setTitle(tr("&Layer"));
+    mViewsAndToolbarsMenu->setText(tr("Views and Toolbars"));
+    mShowTileAnimationEditor->setText(tr("Tile Animation Editor"));
+    mShowTileCollisionEditor->setText(tr("Tile Collision Editor"));
     mActionHandler->retranslateUi();
+    mToolManager->retranslateTools();
 }
 
 void MainWindow::mapDocumentChanged(MapDocument *mapDocument)
@@ -1468,16 +1562,20 @@ void MainWindow::mapDocumentChanged(MapDocument *mapDocument)
 
     mMapDocument = mapDocument;
 
-    mActionHandler->setMapDocument(mMapDocument);
-    mLayerDock->setMapDocument(mMapDocument);
-    mObjectsDock->setMapDocument(mMapDocument);
-    mTilesetDock->setMapDocument(mMapDocument);
-    mTerrainDock->setMapDocument(mMapDocument);
-    AutomappingManager::instance()->setMapDocument(mMapDocument);
-    QuickStampManager::instance()->setMapDocument(mMapDocument);
+    mActionHandler->setMapDocument(mapDocument);
+    mLayerDock->setMapDocument(mapDocument);
+    mObjectsDock->setMapDocument(mapDocument);
+    mTilesetDock->setMapDocument(mapDocument);
+    mTerrainDock->setMapDocument(mapDocument);
+    mMiniMapDock->setMapDocument(mapDocument);
+    mTileAnimationEditor->setMapDocument(mapDocument);
+    mTileCollisionEditor->setMapDocument(mapDocument);
+    mToolManager->setMapDocument(mapDocument);
+    mAutomappingManager->setMapDocument(mapDocument);
+    mQuickStampManager->setMapDocument(mapDocument);
 
-    if (mMapDocument) {
-        connect(mMapDocument, SIGNAL(fileNameChanged()),
+    if (mapDocument) {
+        connect(mapDocument, SIGNAL(fileNameChanged()),
                 SLOT(updateWindowTitle()));
         connect(mapDocument, SIGNAL(currentLayerIndexChanged(int)),
                 SLOT(updateActions()));
@@ -1498,7 +1596,6 @@ void MainWindow::mapDocumentChanged(MapDocument *mapDocument)
 
 void MainWindow::setupQuickStamps()
 {
-    QuickStampManager *quickStampManager = QuickStampManager::instance();
     QList<int> keys = QuickStampManager::keys();
 
     QSignalMapper *selectMapper = new QSignalMapper(this);
@@ -1519,17 +1616,16 @@ void MainWindow::setupQuickStamps()
     }
 
     connect(selectMapper, SIGNAL(mapped(int)),
-            quickStampManager, SLOT(selectQuickStamp(int)));
+            mQuickStampManager, SLOT(selectQuickStamp(int)));
     connect(saveMapper, SIGNAL(mapped(int)),
-            quickStampManager, SLOT(saveQuickStamp(int)));
+            this, SLOT(saveQuickStamp(int)));
 
-    connect(quickStampManager, SIGNAL(setStampBrush(const TileLayer*)),
+    connect(mQuickStampManager, SIGNAL(setStampBrush(const TileLayer*)),
             this, SLOT(setStampBrush(const TileLayer*)));
 }
 
 void MainWindow::closeMapDocument(int index)
 {
-    mDocumentManager->switchToDocument(index);
-    if (confirmSave())
-        mDocumentManager->closeCurrentDocument();
+    if (confirmSave(mDocumentManager->documents().at(index)))
+        mDocumentManager->closeDocumentAt(index);
 }
